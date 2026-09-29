@@ -5,6 +5,17 @@ import { useCPSContext } from '../context/CPSContext';
 import { sanitizeTextEncoding } from '../lib/text/sanitizeTextEncoding';
 import GovernanceConfiguration from './GovernanceConfiguration';
 
+const PLUG_SERVICE_MAPPING = [
+  ['Identification', 'assets[].identification'],
+  ['Discovered Capabilities', 'assets[].capabilities'],
+  ['Lifecycle Services', 'assets[].supportedPhases'],
+  ['Monitoring', 'assets[].capabilities[group=Monitoring]'],
+  ['Cognitive', 'assets[].capabilities[group=Cognitive]'],
+  ['Integration', 'assets[].interfaces'],
+  ['Governance Profile', 'assets[].governance'],
+  ['Lifecycle Evidence', 'assets[].lifecycleEvidence'],
+];
+
 const txt = (value, fallback = '-') => sanitizeTextEncoding(value, { fallback });
 
 const formatEventDate = (ts) => {
@@ -148,7 +159,19 @@ const getEvidenceForCps = (events = [], cps) => {
   return {
     maintenanceCount: maintenanceEvents.length,
     lastEvolution: evolutionEvents[0] || null,
+    lastEvolutionTimestamp: evolutionEvents[0]?.ts || evolutionEvents[0]?.isoDate || null,
+    events: cpsEvents,
   };
+};
+
+const buildIntegrationInterfaces = (cps) => {
+  const interfaces = [];
+  Object.entries(cps?.endpoints || {}).forEach(([name, endpoint]) => {
+    if (endpoint) interfaces.push({ name, protocol: 'REST', endpoint });
+  });
+  if (cps?.topic) interfaces.push({ name: 'MQTT', protocol: 'MQTT', topic: cps.topic });
+  if (hasAasEvidence(cps)) interfaces.push({ name: 'AAS', protocol: 'AAS' });
+  return interfaces;
 };
 
 export default function PlugFase() {
@@ -168,6 +191,7 @@ export default function PlugFase() {
     useCPSContext();
 
   const fileInputRef = useRef(null);
+  const lastPlugSnapshotRef = useRef('');
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [isDownloadingLog, setIsDownloadingLog] = useState(false);
@@ -176,6 +200,11 @@ export default function PlugFase() {
   const [governancePanelLoading, setGovernancePanelLoading] = useState(false);
   const [governancePanelError, setGovernancePanelError] = useState('');
   const [plugLifecycleEvents, setPlugLifecycleEvents] = useState([]);
+  const [plugApiModalOpen, setPlugApiModalOpen] = useState(false);
+  const [plugApiInspection, setPlugApiInspection] = useState({
+    state: 'idle', data: null, httpStatus: null, error: null,
+  });
+  const [plugApiCopyFeedback, setPlugApiCopyFeedback] = useState('');
 
   const eligiblePlayCPS = Array.isArray(playPhaseCPS) ? playPhaseCPS : addedCPS;
   const cpsNamesInPlay = useMemo(
@@ -196,6 +225,103 @@ export default function PlugFase() {
         : null,
     [availableCPS, selectedGovernanceCpsId]
   );
+
+  const plugFacadeSnapshot = useMemo(() => ({
+    assets: (availableCPS || []).map((cps) => {
+      const lifecycleEvidence = getEvidenceForCps(plugLifecycleEvents, cps);
+      const profile = cps?.governanceProfile || {};
+      return {
+        cpsId: cps?.id ?? null,
+        displayName: cps?.displayName ?? cps?.nome ?? null,
+        lifecyclePhase: cps?.lifecyclePhase ?? cps?.lifecycle?.currentPhase ?? null,
+        identification: {
+          manufacturer: cps?.manufacturer ?? null,
+          manufacturerName: cps?.manufacturerName ?? null,
+          model: cps?.model ?? null,
+          modelType: cps?.modelType ?? cps?.assetType ?? null,
+          serialNumber: cps?.serialNumber ?? null,
+          assetName: cps?.assetName ?? cps?.nome ?? null,
+          displayName: cps?.displayName ?? cps?.nome ?? null,
+          description: cps?.description ?? cps?.descricao ?? null,
+        },
+        aas: cps?.aasMetadata ?? cps?.details?.aasMetadata ?? null,
+        capabilities: buildDiscoveredCapabilities(cps),
+        interfaces: buildIntegrationInterfaces(cps),
+        supportedPhases: splitCapabilityList(cps?.lifecycle?.supportedPhases),
+        governance: {
+          profileId: profile?.profileId ?? null,
+          profileVersion: profile?.profileVersion ?? null,
+          status: cps?.governanceStatus ?? profile?.status ?? null,
+        },
+        lifecycleEvidence: {
+          maintenanceCount: lifecycleEvidence.maintenanceCount,
+          lastEvolutionTimestamp: lifecycleEvidence.lastEvolutionTimestamp,
+          events: lifecycleEvidence.events,
+        },
+      };
+    }),
+  }), [availableCPS, plugLifecycleEvents]);
+
+  useEffect(() => {
+    const serialized = JSON.stringify(plugFacadeSnapshot);
+    if (serialized === lastPlugSnapshotRef.current) return;
+    lastPlugSnapshotRef.current = serialized;
+
+    fetch('/api/acsm/plug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: serialized,
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    }).catch((error) => {
+      console.warn('[ACSM Plug facade] Snapshot synchronization failed:', error?.message || error);
+    });
+  }, [plugFacadeSnapshot]);
+
+  const loadPlugApiInspection = async () => {
+    setPlugApiInspection((current) => ({ ...current, state: 'loading', error: null }));
+    setPlugApiCopyFeedback('');
+    try {
+      const response = await fetch('/api/acsm/plug', { method: 'GET', cache: 'no-store' });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw Object.assign(new Error(data?.error || `HTTP ${response.status}`), {
+          httpStatus: response.status,
+        });
+      }
+      setPlugApiInspection({ state: 'success', data, httpStatus: response.status, error: null });
+    } catch (error) {
+      setPlugApiInspection({
+        state: 'error', data: null, httpStatus: error?.httpStatus ?? null,
+        error: error?.message || 'Unknown error',
+      });
+    }
+  };
+
+  const openPlugApiModal = () => {
+    setPlugApiModalOpen(true);
+    loadPlugApiInspection();
+  };
+
+  const closePlugApiModal = () => {
+    setPlugApiModalOpen(false);
+    setPlugApiCopyFeedback('');
+  };
+
+  const copyPlugApiJson = async () => {
+    if (!plugApiInspection.data) return;
+    if (!navigator?.clipboard?.writeText) {
+      setPlugApiCopyFeedback('Clipboard unavailable');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(plugApiInspection.data, null, 2));
+      setPlugApiCopyFeedback('Copied');
+    } catch {
+      setPlugApiCopyFeedback('Copy failed');
+    }
+  };
 
   const loadLifecycleEvents = useCallback(async () => {
     try {
@@ -418,6 +544,14 @@ export default function PlugFase() {
 
         <div className="button-group plug-asset-actions">
           <button type="button" onClick={handlePickFile}>Load AAS manually...</button>
+          <button
+            type="button"
+            className="play-dashboard-btn"
+            onClick={openPlugApiModal}
+            title="Inspect GET /api/acsm/plug"
+          >
+            Plug API
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -573,6 +707,83 @@ export default function PlugFase() {
               isLoading={governancePanelLoading}
               errorMessage={governancePanelError}
             />
+          </div>
+        </div>
+      ) : null}
+
+      {plugApiModalOpen ? (
+        <div className="modal-overlay" role="presentation" onClick={closePlugApiModal}>
+          <div
+            className="modal play-api-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="plug-api-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="api-modal-heading">
+              <h3 id="plug-api-modal-title" className="details-modal-title">Plug Services API</h3>
+              <button type="button" className="api-modal-close" onClick={closePlugApiModal} aria-label="Close Plug Services API inspector">×</button>
+            </div>
+            <div className="play-api-meta">
+              <div><strong>Endpoint:</strong> <code>GET /api/acsm/plug</code></div>
+              <div><strong>HTTP status:</strong> {plugApiInspection.httpStatus ? `${plugApiInspection.httpStatus}${plugApiInspection.httpStatus === 200 ? ' OK' : ''}` : '—'}</div>
+              <div><strong>Timestamp:</strong> {plugApiInspection.data?.timestamp ?? '—'}</div>
+              <div><strong>Evidence status:</strong> <span className="api-status-badge">{plugApiInspection.data?.evidenceStatus ?? '—'}</span></div>
+              <div><strong>Registered CPS:</strong> {plugApiInspection.data?.summary?.registeredCPS ?? '—'}</div>
+              <div><strong>Facade type:</strong> {plugApiInspection.data?.type ?? '—'}</div>
+            </div>
+
+            {plugApiInspection.state === 'loading' && <div className="play-api-message" role="status">Loading Plug API...</div>}
+            {plugApiInspection.state === 'error' && (
+              <div className="play-api-error" role="alert">
+                <strong>Unable to load GET /api/acsm/plug</strong>
+                <span>{plugApiInspection.httpStatus ? `HTTP ${plugApiInspection.httpStatus}: ` : ''}{plugApiInspection.error}</span>
+              </div>
+            )}
+            {plugApiInspection.state === 'success' && (
+              <div className="api-inspection-content">
+                <section className="api-summary-section" aria-labelledby="plug-assets-title">
+                  <h4 id="plug-assets-title">Registered assets</h4>
+                  {plugApiInspection.data?.assets?.length ? (
+                    <div className="api-asset-grid">
+                      {plugApiInspection.data.assets.map((asset, index) => (
+                        <article className="api-asset-card" key={asset?.cps?.cpsId || index}>
+                          <strong>{asset?.cps?.displayName || asset?.cps?.cpsId || 'Unnamed CPS'}</strong>
+                          <span>CPS ID: {asset?.cps?.cpsId ?? '—'}</span>
+                          <span>Lifecycle phase: {asset?.cps?.lifecyclePhase ?? '—'}</span>
+                          <span>Governance: {asset?.governance?.status ?? '—'}</span>
+                          <span>Supported phases: {asset?.supportedPhases?.join(', ') || '—'}</span>
+                        </article>
+                      ))}
+                    </div>
+                  ) : <div className="api-valid-empty-state">NO_DATA — no registered CPS evidence is currently available.</div>}
+                </section>
+                <section className="play-api-service-mapping" aria-labelledby="plug-api-mapping-title">
+                  <h4 id="plug-api-mapping-title">Service Mapping</h4>
+                  <div className="play-api-mapping-grid">
+                    <div className="play-api-mapping-heading">Phase Service</div>
+                    <div className="play-api-mapping-heading">API Field</div>
+                    {PLUG_SERVICE_MAPPING.map(([service, field]) => (
+                      <React.Fragment key={service}>
+                        <div className="play-api-mapping-service">{service}</div>
+                        <code className="play-api-mapping-field">{field}</code>
+                      </React.Fragment>
+                    ))}
+                  </div>
+                </section>
+                <section className="api-json-section" aria-labelledby="plug-json-title">
+                  <h4 id="plug-json-title">Raw JSON</h4>
+                  <pre className="play-api-json">{JSON.stringify(plugApiInspection.data, null, 2)}</pre>
+                </section>
+              </div>
+            )}
+
+            <div className="modal-footer play-api-modal-footer">
+              {plugApiCopyFeedback && <span className="play-api-copy-feedback" role="status">{plugApiCopyFeedback}</span>}
+              <button type="button" className="play-dashboard-btn" onClick={loadPlugApiInspection} disabled={plugApiInspection.state === 'loading'}>Refresh</button>
+              <button type="button" className="play-dashboard-btn" onClick={copyPlugApiJson} disabled={plugApiInspection.state !== 'success' || !plugApiInspection.data}>Copy JSON</button>
+              <button type="button" className="modal-cancel-btn" onClick={closePlugApiModal}>Close</button>
+            </div>
           </div>
         </div>
       ) : null}

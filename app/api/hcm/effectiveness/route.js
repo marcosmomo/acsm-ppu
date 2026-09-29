@@ -3,10 +3,13 @@ import {
   registerEffectiveness,
 } from '../../../../services/memory/cognitiveEpisodicMemoryService';
 import { jsonError, jsonOk, readJsonBody } from '../_response';
+import { commitHcmMirror, initializeHcmPrimary } from '../../../../services/memory/mongoHcmRepository';
 
-export async function GET() {
+export async function GET(request) {
   try {
-    return jsonOk({ effectiveness: listEffectiveness() });
+    await initializeHcmPrimary();
+    const { searchParams } = new URL(request.url);
+    return jsonOk({ effectiveness: listEffectiveness({ limit: searchParams.get('limit') }) });
   } catch (error) {
     return jsonError(error);
   }
@@ -14,9 +17,11 @@ export async function GET() {
 
 export async function POST(request) {
   try {
+    await initializeHcmPrimary();
     const body = await readJsonBody(request);
     console.log('[HCM EFFECTIVENESS] request payload', body);
     const result = registerEffectiveness(body);
+    await commitHcmMirror();
     console.log('[HCM EFFECTIVENESS] response', {
       status: 201,
       effectivenessId: result.effectiveness?.effectivenessId,

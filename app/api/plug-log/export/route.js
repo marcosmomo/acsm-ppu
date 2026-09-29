@@ -1,23 +1,9 @@
-import fs from 'fs/promises';
-import path from 'path';
-import {
-  buildCurrentExperimentLog,
-  parsePlugPhaseLogContent,
-} from '../../../../lib/reports/plugPhaseExperimentLog';
-
-const LOG_FILE = path.join(process.cwd(), 'data', 'plug-phase-log.json');
+import { readPlugLog } from '../../../../services/persistence/plugLogRepository';
 
 export async function GET() {
   try {
-    const raw = await fs.readFile(LOG_FILE, 'utf-8');
-
-    // valida se o JSON está correto antes de exportar
-    const parsed = buildCurrentExperimentLog(parsePlugPhaseLogContent(raw), new Date());
-
-    const fileName = `plug-phase-log-${new Date()
-      .toISOString()
-      .replace(/[:.]/g, '-')}.json`;
-
+    const parsed = await readPlugLog();
+    const fileName = `plug-phase-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     return new Response(JSON.stringify(parsed, null, 2), {
       status: 200,
       headers: {
@@ -27,12 +13,6 @@ export async function GET() {
       },
     });
   } catch (error) {
-    return Response.json(
-      {
-        error: 'Failed to export plug log file.',
-        details: String(error?.message || error),
-      },
-      { status: 500 }
-    );
+    return Response.json({ error: 'Failed to export plug log from MongoDB.', details: String(error?.message || error) }, { status: 503 });
   }
 }

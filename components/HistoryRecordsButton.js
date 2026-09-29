@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 
-const API_BASE = process.env.NEXT_PUBLIC_NODE_RED_BASE_URL || 'http://localhost:1881';
+const API_BASE = '';
 
 function getNestedValue(record, keys) {
   for (const key of keys) {

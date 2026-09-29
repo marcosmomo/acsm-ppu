@@ -27,7 +27,10 @@ class Mqtt {
   }
   publish(topic, payload) {
     if (!this.client || this.config.runtimeMode !== 'active') return false;
-    this.client.publish(topic, JSON.stringify(payload), { qos: 1 });
+    const marked = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { ...payload, cpsId: payload.cpsId || this.config.cpsId, origin: 'acsm-main-simulation', environmentId: 'acsm-main' }
+      : payload;
+    this.client.publish(topic, JSON.stringify(marked), { qos: 1 });
     return true;
   }
   close() { this.client?.end(); }

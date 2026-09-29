@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useCPSContext } from '../context/CPSContext';
 import { getActiveAcsmConfig, normalizeCpsId } from '../lib/acsm/config';
 import GovernanceApproval from './GovernanceApproval';
@@ -9,6 +10,26 @@ import GovernanceApproval from './GovernanceApproval';
 const normalizeStatus = (status) => String(status || '').toLowerCase();
 
 const DATA_SPACE_URL = 'https://dataspace-v2.vercel.app/';
+const PLAY_GOVERNANCE_CPS_IDS = new Set(['cps1', 'cps5', 'cps7']);
+
+const PLAY_SERVICE_MAPPING = [
+  ['Active CPS', 'activeCPS'],
+  ['Global OEE', 'globalOEE'],
+  ['System Health', 'systemHealth'],
+  ['Critical CPS', 'criticalCPS'],
+  ['System State', 'systemState'],
+  ['Learning', 'learning'],
+  ['Reasoning', 'reasoning'],
+  ['Prediction', 'prediction'],
+  ['Recommendation (governed)', 'recommendation'],
+  ['Interpretation', 'interpretation'],
+];
+
+const formatFacadeRatio = (value) => {
+  if (value === null || value === undefined) return 'No evidence';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(2)}%` : String(value);
+};
 
 const humanizeFeatStatus = (status) => {
   const s = normalizeStatus(status);
@@ -350,7 +371,7 @@ const openExternalUrl = (url, emptyMessage) => {
   window.open(finalUrl, '_blank', 'noopener,noreferrer');
 };
 
-const openAnalyticsPage = (cps) => {
+const openAnalyticsPage = (router, cps) => {
   const activeAcsm = getActiveAcsmConfig();
   const rawId = cps?.id || cps?.cpsId || cps?.baseTopic || cps?.cps;
   const cleanId = normalizeCpsId(rawId);
@@ -368,15 +389,15 @@ const openAnalyticsPage = (cps) => {
   const cpsId = encodeURIComponent(cleanId);
   const cpsName = encodeURIComponent(cps?.nome || rawId || 'CPS');
 
-  window.open(`/analytics?cpsId=${cpsId}&cpsName=${cpsName}`, '_blank', 'noopener,noreferrer');
+  router.push(`/analytics?cpsId=${cpsId}&cpsName=${cpsName}`);
 };
 
-const openSystemAnalyticsPage = () => {
-  window.open('/analytics-system', '_blank', 'noopener,noreferrer');
+const openSystemAnalyticsPage = (router) => {
+  router.push('/analytics-system');
 };
 
-const openHcmPage = () => {
-  window.open('/hcm', '_blank', 'noopener,noreferrer');
+const openHcmPage = (router) => {
+  router.push('/hcm');
 };
 
 const formatDateTime = (value) => {
@@ -400,6 +421,7 @@ const getLifecyclePhase = (cps) =>
     .toLowerCase();
 
 const PlayFase = () => {
+  const router = useRouter();
   const {
     acsmConfig,
     addedCPS,
@@ -422,12 +444,90 @@ const PlayFase = () => {
   const [modalOperationDesc, setModalOperationDesc] = useState('');
   const [modalStatus, setModalStatus] = useState(null);
   const [modalLastUpdate, setModalLastUpdate] = useState(null);
+  const [playApiModalOpen, setPlayApiModalOpen] = useState(false);
+  const [playApiInspection, setPlayApiInspection] = useState({
+    state: 'idle', data: null, httpStatus: null, error: null,
+  });
+  const [playApiCopyFeedback, setPlayApiCopyFeedback] = useState('');
+  const lastPlaySnapshotRef = useRef('');
   const visibleCPS = Array.isArray(playPhaseCPS) ? playPhaseCPS : addedCPS;
   const registeredCpsCount =
     Array.isArray(acsmConfig?.managedCpsIds) && acsmConfig.managedCpsIds.length > 0
       ? acsmConfig.managedCpsIds.length
       : visibleCPS.length;
   const activeCpsCount = visibleCPS.filter((cps) => getLifecyclePhase(cps) === 'play').length;
+  const playCpsIds = useMemo(
+    () => new Set(
+      visibleCPS
+        .filter((cps) => getLifecyclePhase(cps) === 'play')
+        .map((cps) => normalizeCpsId(cps?.id ?? cps?.cpsId ?? cps?.baseTopic ?? cps?.topic))
+        .filter(Boolean)
+    ),
+    [visibleCPS]
+  );
+  const pendingPlayGovernanceActions = useMemo(
+    () => (Array.isArray(pendingGovernanceActions) ? pendingGovernanceActions : []).filter(
+      (action) =>
+        action?.status === 'PENDING_HUMAN_APPROVAL' &&
+        PLAY_GOVERNANCE_CPS_IDS.has(normalizeCpsId(action?.cpsId)) &&
+        playCpsIds.has(normalizeCpsId(action?.cpsId))
+    ),
+    [pendingGovernanceActions, playCpsIds]
+  );
+
+  const playFacadeSnapshot = useMemo(() => {
+    const analytics = stableSystemAnalytics || systemAnalytics || {};
+    const historySize = Number(
+      analytics?.historySummary?.samples ??
+      analytics?.learning?.historySize ??
+      analytics?.systemLearningModel?.historySize ??
+      0
+    );
+
+    return {
+      cps: (addedCPS || []).map((cps) => ({
+        cpsId: cps?.id ?? cps?.cpsId ?? null,
+        lifecyclePhase: cps?.lifecyclePhase ?? cps?.lifecycle?.phase ?? cps?.lifecycle?.currentPhase ?? null,
+        status: cps?.operationalState ?? cps?.globalState?.state ?? cps?.status ?? null,
+        oee: {
+          value: cps?.oee?.value ?? cps?.oee?.current ?? null,
+          availability: cps?.oee?.availability ?? null,
+          performance: cps?.oee?.performance ?? null,
+          quality: cps?.oee?.quality ?? null,
+        },
+        health: cps?.health && typeof cps.health === 'object'
+          ? {
+              state: cps.health.state ?? null,
+              label: cps.health.label ?? cps.health.healthLabel ?? null,
+              score: cps.health.score ?? cps.health.healthScore ?? null,
+            }
+          : null,
+      })),
+      analytics,
+      historySize: Number.isFinite(historySize) ? historySize : 0,
+      recommendation: analytics?.recommendation && typeof analytics.recommendation === 'object'
+        ? analytics.recommendation
+        : analytics?.actionPlan ?? analytics?.systemReasoning ?? analytics?.reasoning ?? null,
+      interpretation: analytics?.interpretation ?? null,
+    };
+  }, [addedCPS, stableSystemAnalytics, systemAnalytics]);
+
+  useEffect(() => {
+    const serialized = JSON.stringify(playFacadeSnapshot);
+    if (serialized === lastPlaySnapshotRef.current) return;
+    lastPlaySnapshotRef.current = serialized;
+
+    fetch('/api/acsm/play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: serialized,
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    }).catch((error) => {
+      console.warn('[ACSM Play facade] Snapshot synchronization failed:', error?.message || error);
+    });
+  }, [playFacadeSnapshot]);
 
   const globalOee = useMemo(() => {
     const validOees = visibleCPS
@@ -456,6 +556,19 @@ const PlayFase = () => {
   }, [visibleCPS]);
 
   const executiveSummary = useMemo(() => {
+    if (activeCpsCount === 0) {
+      return {
+        systemHealth: '—',
+        criticalCps: '—',
+        systemState: 'No active CPS',
+        systemLearning: '—',
+        dominantLoss: '—',
+        predictedOee: '—',
+        recommendation: 'No active CPS in Play.',
+        interpretation: 'No system interpretation available while no CPS is in Play.',
+      };
+    }
+
     const analytics = stableSystemAnalytics || systemAnalytics || {};
 
     return {
@@ -468,7 +581,7 @@ const PlayFase = () => {
       recommendation: getRecommendationText(analytics),
       interpretation: getInterpretationText(analytics, globalOee.label),
     };
-  }, [globalOee.label, stableSystemAnalytics, systemAnalytics]);
+  }, [activeCpsCount, globalOee.label, stableSystemAnalytics, systemAnalytics]);
 
   const openStatusDetails = (cps, feat) => {
     setModalCpsName(cps.nome);
@@ -488,6 +601,50 @@ const PlayFase = () => {
     setModalOperationDesc('');
     setModalStatus(null);
     setModalLastUpdate(null);
+  };
+
+  const loadPlayApiInspection = async () => {
+    setPlayApiInspection((current) => ({ ...current, state: 'loading', error: null }));
+    setPlayApiCopyFeedback('');
+    try {
+      const response = await fetch('/api/acsm/play', { method: 'GET', cache: 'no-store' });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw Object.assign(new Error(data?.error || `HTTP ${response.status}`), {
+          httpStatus: response.status,
+        });
+      }
+      setPlayApiInspection({ state: 'success', data, httpStatus: response.status, error: null });
+    } catch (error) {
+      setPlayApiInspection({
+        state: 'error', data: null, httpStatus: error?.httpStatus ?? null,
+        error: error?.message || 'Unknown error',
+      });
+    }
+  };
+
+  const openPlayApiModal = () => {
+    setPlayApiModalOpen(true);
+    loadPlayApiInspection();
+  };
+
+  const closePlayApiModal = () => {
+    setPlayApiModalOpen(false);
+    setPlayApiCopyFeedback('');
+  };
+
+  const copyPlayApiJson = async () => {
+    if (!playApiInspection.data) return;
+    if (!navigator?.clipboard?.writeText) {
+      setPlayApiCopyFeedback('Clipboard unavailable');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(playApiInspection.data, null, 2));
+      setPlayApiCopyFeedback('Copied');
+    } catch {
+      setPlayApiCopyFeedback('Copy failed');
+    }
   };
 
   const handleExit = async (cps) => {
@@ -561,29 +718,39 @@ const PlayFase = () => {
 
               <div className="play-executive-actions">
                 <button
-                  onClick={openSystemAnalyticsPage}
+                  onClick={() => openSystemAnalyticsPage(router)}
                   className="play-dashboard-btn"
                   title="Open ACSM system dashboard"
                 >
                   ACSM Dashboard
                 </button>
                 <button
-                  onClick={openHcmPage}
+                  onClick={() => openHcmPage(router)}
                   className="play-dashboard-btn"
                   title="Open ACSM Hierarchical Cognitive Memory"
                 >
                   HCM
+                </button>
+                <button
+                  type="button"
+                  onClick={openPlayApiModal}
+                  className="play-dashboard-btn"
+                  title="Inspect GET /api/acsm/play"
+                >
+                  Play API
                 </button>
               </div>
             </div>
           </div>
         </div>
 
-        <GovernanceApproval
-          actions={pendingGovernanceActions}
-          onApprove={(actionId) => decidePendingGovernanceAction(actionId, 'approved')}
-          onReject={(actionId) => decidePendingGovernanceAction(actionId, 'rejected')}
-        />
+        {pendingPlayGovernanceActions.length > 0 ? (
+          <GovernanceApproval
+            actions={pendingPlayGovernanceActions}
+            onApprove={(actionId) => decidePendingGovernanceAction(actionId, 'approved')}
+            onReject={(actionId) => decidePendingGovernanceAction(actionId, 'rejected')}
+          />
+        ) : null}
 
         <ul className="cps-list-play">
           {visibleCPS.length > 0 ? (
@@ -738,7 +905,7 @@ const PlayFase = () => {
                           </button>
 
                           <button
-                            onClick={() => openAnalyticsPage(cps)}
+                            onClick={() => openAnalyticsPage(router, cps)}
                             className="desc-btn"
                             title={`Open analytics page for ${cps.nome}`}
                           >
@@ -845,7 +1012,7 @@ const PlayFase = () => {
                           </button>
 
                           <button
-                            onClick={() => openAnalyticsPage(cps)}
+                            onClick={() => openAnalyticsPage(router, cps)}
                             className="desc-btn"
                             title={`Open analytics page for ${cps.nome}`}
                           >
@@ -947,7 +1114,7 @@ const PlayFase = () => {
                           </button>
 
                           <button
-                            onClick={() => openAnalyticsPage(cps)}
+                            onClick={() => openAnalyticsPage(router, cps)}
                             className="desc-btn"
                             title={`Open analytics page for ${cps.nome}`}
                           >
@@ -1189,6 +1356,113 @@ const PlayFase = () => {
                 </>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {playApiModalOpen && (
+        <div className="modal-overlay" role="presentation" onClick={closePlayApiModal}>
+          <div
+            className="modal play-api-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="play-api-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="api-modal-heading">
+              <h3 id="play-api-modal-title" className="details-modal-title">Play Services API</h3>
+              <button type="button" className="api-modal-close" onClick={closePlayApiModal} aria-label="Close Play Services API inspector">×</button>
+            </div>
+            <div className="play-api-meta">
+              <div><strong>Endpoint:</strong> <code>GET /api/acsm/play</code></div>
+              <div><strong>HTTP status:</strong> {playApiInspection.httpStatus ? `${playApiInspection.httpStatus}${playApiInspection.httpStatus === 200 ? ' OK' : ''}` : '—'}</div>
+              <div><strong>Timestamp:</strong> {playApiInspection.data?.timestamp ?? '—'}</div>
+              <div><strong>Active CPS:</strong> {playApiInspection.data?.activeCPS?.count ?? '—'}</div>
+            </div>
+
+            {playApiInspection.state === 'loading' && <div className="play-api-message" role="status">Loading Play API...</div>}
+            {playApiInspection.state === 'error' && (
+              <div className="play-api-error" role="alert">
+                <strong>Unable to load GET /api/acsm/play</strong>
+                <span>{playApiInspection.httpStatus ? `HTTP ${playApiInspection.httpStatus}: ` : ''}{playApiInspection.error}</span>
+              </div>
+            )}
+
+            {playApiInspection.state === 'success' && (() => {
+              const data = playApiInspection.data || {};
+              return (
+                <div className="api-inspection-content">
+                  <section className="api-summary-section" aria-labelledby="play-overview-title">
+                    <h4 id="play-overview-title">Play facade evidence</h4>
+                    <div className="api-metric-grid">
+                      <div className="api-metric-card"><span>Global OEE</span><strong>{formatFacadeRatio(data.globalOEE?.current)}</strong><small>{data.globalOEE?.evidenceStatus ?? 'NO_DATA'}</small></div>
+                      <div className="api-metric-card"><span>Availability</span><strong>{formatFacadeRatio(data.globalOEE?.availability)}</strong></div>
+                      <div className="api-metric-card"><span>Performance</span><strong>{formatFacadeRatio(data.globalOEE?.performance)}</strong></div>
+                      <div className="api-metric-card"><span>Quality</span><strong>{formatFacadeRatio(data.globalOEE?.quality)}</strong></div>
+                      <div className="api-metric-card"><span>System Health</span><strong>{data.systemHealth?.state ?? 'UNKNOWN'}</strong><small>Score: {data.systemHealth?.score ?? 'No evidence'}</small></div>
+                      <div className="api-metric-card"><span>System State</span><strong>{data.systemState ?? 'UNKNOWN'}</strong></div>
+                    </div>
+                  </section>
+
+                  <section className="api-detail-grid" aria-label="Cognitive service evidence">
+                    <article className="api-detail-card">
+                      <h4>Critical CPS</h4>
+                      {data.criticalCPS ? <><span>CPS ID: {data.criticalCPS.cpsId ?? '—'}</span><span>OEE: {formatFacadeRatio(data.criticalCPS.oee)}</span>{data.criticalCPS.reason && <span>Reason: {data.criticalCPS.reason}</span>}</> : <span>NO_EVIDENCE</span>}
+                    </article>
+                    <article className="api-detail-card">
+                      <h4>Learning</h4><span className="api-status-badge">{data.learning?.state ?? 'NO_DATA'}</span>
+                      <span>History size: {data.learning?.historySize ?? 0} / {data.learning?.minimumHistory ?? '—'}</span>
+                    </article>
+                    <article className="api-detail-card">
+                      <h4>Reasoning</h4><span className="api-status-badge">{data.reasoning?.state ?? 'INSUFFICIENT_DATA'}</span>
+                      <span>Dominant loss: {data.reasoning?.dominantLoss ?? 'No evidence'}</span>
+                      <span>Critical CPS: {data.reasoning?.criticalCPS ?? 'No evidence'}</span>
+                    </article>
+                    <article className="api-detail-card">
+                      <h4>Prediction</h4><span className="api-status-badge">{data.prediction?.state ?? 'INSUFFICIENT_HISTORY'}</span>
+                      {data.prediction?.predictedSystemOEE !== null && data.prediction?.predictedSystemOEE !== undefined && <span>Predicted System OEE: {formatFacadeRatio(data.prediction.predictedSystemOEE)}</span>}
+                    </article>
+                    <article className="api-detail-card api-detail-card-governed">
+                      <h4>Recommendation <small>Informational / governed</small></h4>
+                      <span className="api-status-badge">{data.recommendation?.state ?? 'NO_RECOMMENDATION'}</span>
+                      <span>Recommendation: {data.recommendation?.recommendation ?? 'No recommendation'}</span>
+                      <span>Governable action: {data.recommendation?.governableAction ?? 'None'}</span>
+                      <span>CPS ID: {data.recommendation?.cpsId ?? '—'}</span>
+                      {data.recommendation?.confidence !== null && data.recommendation?.confidence !== undefined && <span>Confidence: {data.recommendation.confidence}</span>}
+                    </article>
+                    <article className="api-detail-card">
+                      <h4>Interpretation</h4><span className="api-status-badge">{data.interpretation?.state ?? 'NO_EVIDENCE'}</span>
+                      <span>{data.interpretation?.text ?? 'No interpretation evidence'}</span>
+                    </article>
+                  </section>
+
+                  <section className="play-api-service-mapping" aria-labelledby="play-api-mapping-title">
+                    <h4 id="play-api-mapping-title">Service Mapping</h4>
+                    <div className="play-api-mapping-grid">
+                      <div className="play-api-mapping-heading">Play Service</div>
+                      <div className="play-api-mapping-heading">API Field</div>
+                      {PLAY_SERVICE_MAPPING.map(([service, field]) => (
+                        <React.Fragment key={service}>
+                          <div className="play-api-mapping-service">{service}</div>
+                          <code className="play-api-mapping-field">{field}</code>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </section>
+                  <section className="api-json-section" aria-labelledby="play-json-title">
+                    <h4 id="play-json-title">Raw JSON</h4>
+                    <pre className="play-api-json">{JSON.stringify(data, null, 2)}</pre>
+                  </section>
+                </div>
+              );
+            })()}
+
+            <div className="modal-footer play-api-modal-footer">
+              {playApiCopyFeedback && <span className="play-api-copy-feedback" role="status">{playApiCopyFeedback}</span>}
+              <button type="button" className="play-dashboard-btn" onClick={loadPlayApiInspection} disabled={playApiInspection.state === 'loading'}>Refresh</button>
+              <button type="button" className="play-dashboard-btn" onClick={copyPlayApiJson} disabled={playApiInspection.state !== 'success' || !playApiInspection.data}>Copy JSON</button>
+              <button type="button" className="modal-cancel-btn" onClick={closePlayApiModal}>Close</button>
+            </div>
           </div>
         </div>
       )}

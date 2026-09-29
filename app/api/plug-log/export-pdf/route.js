@@ -1,11 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { buildCurrentExperimentLog } from '../../../../lib/reports/plugPhaseExperimentLog';
+import { readPlugLog } from '../../../../services/persistence/plugLogRepository';
 
 export const runtime = 'nodejs';
 
-const LOG_FILE = path.join(process.cwd(), 'data', 'plug-phase-log.json');
 const LOGO_FILE = path.join(process.cwd(), 'public', 'acsm-logo.png');
 
 function safeText(value) {
@@ -133,20 +132,7 @@ function summarizeEvents(events) {
 
 export async function GET() {
   try {
-    const raw = await fs.readFile(LOG_FILE, 'utf-8');
-
-    let log;
-    try {
-      log = buildCurrentExperimentLog(JSON.parse(raw), new Date());
-    } catch (parseError) {
-      return Response.json(
-        {
-          error: 'O arquivo plug-phase-log.json está com JSON inválido.',
-          details: String(parseError?.message || parseError),
-        },
-        { status: 500 }
-      );
-    }
+    const log = await readPlugLog();
 
     const events = Array.isArray(log?.events) ? log.events : [];
     const grouped = groupEventsByCps(events);
@@ -559,7 +545,7 @@ export async function GET() {
     drawWrappedParagraph('Architecture: ', 'ACSM - Architecture of Control for Smart Manufacturing');
     drawWrappedParagraph('Lifecycle phase: ', 'Plug Phase');
     drawWrappedParagraph('Purpose: ', 'Provide a readable industrial report for CPS onboarding, registration history, state transitions, and lifecycle event evidence.');
-    drawWrappedParagraph('Event registry source: ', 'data/plug-phase-log.json (current ACSM experiment)');
+    drawWrappedParagraph('Event registry source: ', 'MongoDB operational_events (ACSM Main)');
     drawDivider();
 
     drawSectionTitle('2. Global Indicators');

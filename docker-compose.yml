@@ -1,4 +1,56 @@
 services:
+  acsm-main-mysql:
+    image: mysql:8.4
+    container_name: acsm-main-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${ACSM_MAIN_MYSQL_DATABASE:-acsm_main_telemetry}
+      MYSQL_USER: ${ACSM_MAIN_MYSQL_USER:-acsm_main}
+      MYSQL_PASSWORD: ${ACSM_MAIN_MYSQL_PASSWORD:-change-me-before-persistence-use}
+      MYSQL_ROOT_PASSWORD: ${ACSM_MAIN_MYSQL_ROOT_PASSWORD:-change-root-before-persistence-use}
+    volumes: [acsm-main-mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [acsm-network]
+
+  acsm-main-mongodb:
+    image: mongo:8
+    container_name: acsm-main-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${ACSM_MAIN_MONGO_ROOT_USER:-acsm_main_root}
+      MONGO_INITDB_ROOT_PASSWORD: ${ACSM_MAIN_MONGO_ROOT_PASSWORD:-change-mongo-before-persistence-use}
+    volumes: [acsm-main-mongodb-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [acsm-network]
+
+  acsm-main-persistence:
+    build: { context: ./services/persistence }
+    image: acsm-main-persistence:latest
+    container_name: acsm-main-persistence
+    restart: unless-stopped
+    environment:
+      MQTT_URL: mqtt://acsm-mosquitto:1883
+      MYSQL_URL: mysql://${ACSM_MAIN_MYSQL_USER:-acsm_main}:${ACSM_MAIN_MYSQL_PASSWORD:-change-me-before-persistence-use}@acsm-main-mysql:3306/${ACSM_MAIN_MYSQL_DATABASE:-acsm_main_telemetry}
+      MONGO_URL: mongodb://${ACSM_MAIN_MONGO_ROOT_USER:-acsm_main_root}:${ACSM_MAIN_MONGO_ROOT_PASSWORD:-change-mongo-before-persistence-use}@acsm-main-mongodb:27017/?authSource=admin
+      MONGO_DATABASE: ${ACSM_MAIN_MONGO_DATABASE:-acsm_main_documents}
+      PERSISTENCE_MAX_PENDING: ${ACSM_MAIN_MAX_PENDING:-10000}
+      PERSISTENCE_MAX_ATTEMPTS: ${ACSM_MAIN_MAX_ATTEMPTS:-12}
+    ports: ["3010:3010"]
+    volumes: [acsm-main-persistence-data:/app/data]
+    depends_on:
+      acsm-mosquitto: { condition: service_started }
+      acsm-main-mysql: { condition: service_healthy }
+      acsm-main-mongodb: { condition: service_healthy }
+    networks: [acsm-network]
+
   acsm-mosquitto:
     image: eclipse-mosquitto:latest
     container_name: acsm-mosquitto
@@ -91,6 +143,9 @@ networks:
     external: true
 
 volumes:
+  acsm-main-mysql-data:
+  acsm-main-mongodb-data:
+  acsm-main-persistence-data:
   cps1-data:
     external: true
   cps5-data:

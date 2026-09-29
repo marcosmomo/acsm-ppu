@@ -1,19 +1,20 @@
 // /components/MainComponent.js
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import PlugFase from './PlugFase';
 import PlayFase from './PlayFase';
-import { CPSProvider } from '../context/CPSContext';
+import ApiCatalogModal from './ApiCatalogModal';
 import '../styles/globals.css';
 import { Cpu } from 'lucide-react';
 
 const MainComponent = () => {
+  const [apiCatalogOpen, setApiCatalogOpen] = useState(false);
+
   return (
-    <CPSProvider>
-      <div className="full-screen-app">
+    <div className="full-screen-app">
         <header className="main-header flex items-center">
-          <div className="flex items-start sm:items-center gap-3 sm:gap-4">
+          <div className="main-header-content flex items-start sm:items-center gap-3 sm:gap-4">
             <div className="h-12 w-12 sm:h-14 sm:w-14 rounded-xl bg-gradient-to-br from-primary to-primary/80 flex items-center justify-center shadow-lg shadow-primary/20 ring-2 ring-primary/10">
               <Cpu className="h-6 w-6 sm:h-7 sm:w-7 text-primary-foreground" />
             </div>
@@ -23,6 +24,14 @@ const MainComponent = () => {
               </h1>
             </div>
           </div>
+          <button
+            type="button"
+            className="main-header-api-btn"
+            onClick={() => setApiCatalogOpen(true)}
+            title="Inspect the ACSM API catalog"
+          >
+            APIs
+          </button>
         </header>
 
         <main className="main-content-split">
@@ -33,8 +42,8 @@ const MainComponent = () => {
             <PlayFase />
           </div>
         </main>
-      </div>
-    </CPSProvider>
+        <ApiCatalogModal open={apiCatalogOpen} onClose={() => setApiCatalogOpen(false)} />
+    </div>
   );
 };
 

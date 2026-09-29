@@ -1,7 +1,7 @@
 'use client';
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
-import { CPSProvider, useCPSContext } from '../../context/CPSContext';
+import { useCPSContext } from '../../context/CPSContext';
 import GenerativeAIInterpretationPanel from '../../components/GenerativeAIInterpretationPanel';
 import { getActiveAcsmConfig, normalizeCpsId } from '../../lib/acsm/config';
 import { buildLevel2KnowledgePackage } from '../../lib/ai/knowledgePackages';
@@ -609,10 +609,8 @@ function AnalyticsSystemContent() {
 
 export default function AnalyticsSystemPage() {
   return (
-    <CPSProvider>
-      <Suspense fallback={<div className={styles.shell}>Loading system analytics dashboard...</div>}>
-        <AnalyticsSystemContent />
-      </Suspense>
-    </CPSProvider>
+    <Suspense fallback={<div className={styles.shell}>Loading system analytics dashboard...</div>}>
+      <AnalyticsSystemContent />
+    </Suspense>
   );
 }

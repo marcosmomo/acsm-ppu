@@ -15,11 +15,7 @@ import {
   registerEvent,
 } from '../memory/cognitiveEpisodicMemoryService';
 import { executeGovernedAction } from './governedActionExecutor';
-import {
-  CURRENT_PLUG_PHASE_LOG_FILE,
-  buildCurrentExperimentLog,
-  parsePlugPhaseLogContent,
-} from '../../lib/reports/plugPhaseExperimentLog';
+import { writePlugLogEvent } from '../persistence/plugLogRepository';
 
 const DEFAULT_STORE = { profiles: {}, profileVersions: {}, pendingActions: {}, history: [] };
 
@@ -124,43 +120,9 @@ const recordHistory = (store, event) => {
 };
 
 const persistPlugLifecycleEvent = (event) => {
-  try {
-    const file = path.join(process.cwd(), CURRENT_PLUG_PHASE_LOG_FILE);
-    const raw = fs.existsSync(file)
-      ? parsePlugPhaseLogContent(fs.readFileSync(file, 'utf-8'))
-      : { events: [] };
-    const events = Array.isArray(raw?.events) ? raw.events : [];
-    const entry = {
-      id: event?.id || `evt-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      phase: event?.phase || 'plug',
-      eventType: event?.eventType || 'lifecycle_event',
-      cpsId: event?.cpsId || null,
-      cpsName: event?.cpsName || null,
-      topic: event?.topic || event?.cpsId || null,
-      message: event?.message || 'Lifecycle event recorded.',
-      details: event?.details || {},
-      ts: event?.ts || Date.now(),
-      isoDate: new Date(event?.ts || Date.now()).toISOString(),
-    };
-
-    if (entry.id && events.some((item) => String(item?.id || '') === String(entry.id))) {
-      return null;
-    }
-
-    const nextLog = buildCurrentExperimentLog(
-      {
-        ...raw,
-        events: [...events, entry],
-      },
-      new Date()
-    );
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(nextLog, null, 2)}\n`, 'utf-8');
-    return entry;
-  } catch (error) {
-    console.warn('[PLUG_LIFECYCLE_LOG_WARN]', error?.message || error);
-    return null;
-  }
+  const pending = writePlugLogEvent(event);
+  pending.catch((error) => console.warn('[PLUG_LIFECYCLE_MONGODB_PENDING]', error?.message || error));
+  return pending;
 };
 
 const recordHcmGovernanceEvent = (eventType, content = {}) => {

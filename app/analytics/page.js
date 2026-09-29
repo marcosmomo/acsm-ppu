@@ -3,7 +3,6 @@
 import React, { Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import CPSAnalyticsFromContext from '../../components/CPSAnalyticsFromContext';
-import { CPSProvider } from '../../context/CPSContext';
 import {
   getActiveAcsmConfig,
   getManagedCpsIdsForAcsm,
@@ -119,16 +118,14 @@ function AnalyticsContent() {
 
 export default function AnalyticsPage() {
   return (
-    <CPSProvider>
-      <Suspense
-        fallback={
-          <div style={{ padding: 28, textAlign: 'center', fontWeight: 'bold' }}>
-            Loading automation dashboard...
-          </div>
-        }
-      >
-        <AnalyticsContent />
-      </Suspense>
-    </CPSProvider>
+    <Suspense
+      fallback={
+        <div style={{ padding: 28, textAlign: 'center', fontWeight: 'bold' }}>
+          Loading automation dashboard...
+        </div>
+      }
+    >
+      <AnalyticsContent />
+    </Suspense>
   );
 }

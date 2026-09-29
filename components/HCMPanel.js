@@ -380,6 +380,7 @@ export default function HCMPanel() {
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [detailsError, setDetailsError] = useState('');
 
   const latestEpisode = episodes[0] || null;
   const latestEvents = asArray(latestDetail?.events);
@@ -551,10 +552,20 @@ export default function HCMPanel() {
     }
 
     setDetailsLoading(true);
+    setDetailsError('');
+    const timeoutController = new AbortController();
+    let timedOut = false;
+    const abortFromParent = () => timeoutController.abort();
+    if (signal?.aborted) abortFromParent();
+    signal?.addEventListener('abort', abortFromParent, { once: true });
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, 10000);
     try {
       const detailResponse = await fetch(`${getHcmApiBase()}/episode/${episodeId}`, {
         cache: 'no-store',
-        signal,
+        signal: timeoutController.signal,
       });
       const detailJson = await detailResponse.json().catch(() => null);
       if (!detailResponse.ok) {
@@ -563,7 +574,16 @@ export default function HCMPanel() {
 
       setLatestDetail(detailJson?.episode || null);
       return detailJson?.episode || null;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const message = timedOut
+        ? 'HCM episode detail timed out after 10 seconds.'
+        : error?.message || 'Failed to load HCM episode detail.';
+      setDetailsError(message);
+      throw new Error(message);
     } finally {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', abortFromParent);
       setDetailsLoading(false);
     }
   }, []);
@@ -572,35 +592,81 @@ export default function HCMPanel() {
     async (signal) => {
       setError('');
       setLoading(true);
+      const fetchCollection = async (path, label) => {
+        const timeoutController = new AbortController();
+        let timedOut = false;
+        const abortFromParent = () => timeoutController.abort();
+        if (signal?.aborted) abortFromParent();
+        signal?.addEventListener('abort', abortFromParent, { once: true });
+        const timeoutId = setTimeout(() => {
+          timedOut = true;
+          timeoutController.abort();
+        }, 10000);
+
+        try {
+          const response = await fetch(`${getHcmApiBase()}${path}`, {
+            cache: 'no-store',
+            signal: timeoutController.signal,
+          });
+          const json = await response.json().catch(() => null);
+          if (!response.ok) throw new Error(json?.error || `${label} request failed.`);
+          return json;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (timedOut) throw new Error(`${label} timed out after 10 seconds.`);
+          throw new Error(`${label}: ${error?.message || 'request failed.'}`);
+        } finally {
+          clearTimeout(timeoutId);
+          signal?.removeEventListener('abort', abortFromParent);
+        }
+      };
+
+      let latestEpisodeId = null;
       try {
-        const [episodesResponse, openResponse, effectivenessResponse, knowledgeResponse] = await Promise.all([
-          fetch(`${getHcmApiBase()}/episodes`, { cache: 'no-store', signal }),
-          fetch(`${getHcmApiBase()}/episodes/open`, { cache: 'no-store', signal }),
-          fetch(`${getHcmApiBase()}/effectiveness`, { cache: 'no-store', signal }),
-          fetch(`${getHcmApiBase()}/knowledge`, { cache: 'no-store', signal }),
+        const results = await Promise.allSettled([
+          fetchCollection('/episodes?limit=20', 'Episodes'),
+          fetchCollection('/episodes/open', 'Open episodes'),
+          fetchCollection('/effectiveness?limit=20', 'Effectiveness'),
+          fetchCollection('/knowledge?limit=20', 'Knowledge'),
         ]);
-        const episodesJson = await episodesResponse.json().catch(() => null);
-        const openJson = await openResponse.json().catch(() => null);
-        const effectivenessJson = await effectivenessResponse.json().catch(() => null);
-        const knowledgeJson = await knowledgeResponse.json().catch(() => null);
+        const errors = [];
+        const [episodesResult, openResult, effectivenessResult, knowledgeResult] = results;
 
-        if (!episodesResponse.ok) throw new Error(episodesJson?.error || 'Failed to load HCM episodes.');
-        if (!openResponse.ok) throw new Error(openJson?.error || 'Failed to load open HCM episodes.');
-        if (!effectivenessResponse.ok) {
-          throw new Error(effectivenessJson?.error || 'Failed to load HCM effectiveness.');
-        }
-        if (!knowledgeResponse.ok) {
-          throw new Error(knowledgeJson?.error || 'Failed to load HCM knowledge.');
+        if (episodesResult.status === 'fulfilled') {
+          const loadedEpisodes = asArray(episodesResult.value?.episodes);
+          setEpisodes(loadedEpisodes);
+          latestEpisodeId = loadedEpisodes[0]?.episodeId || null;
+        } else if (!signal?.aborted) {
+          errors.push(episodesResult.reason?.message || 'Failed to load HCM episodes.');
         }
 
-        const loadedEpisodes = asArray(episodesJson?.episodes);
-        setEpisodes(loadedEpisodes);
-        setOpenEpisodes(asArray(openJson?.episodes));
-        setEffectiveness(asArray(effectivenessJson?.effectiveness));
-        setKnowledgeItems(asArray(knowledgeJson?.knowledgeItems));
-        await loadLatestDetail(loadedEpisodes[0]?.episodeId, signal);
+        if (openResult.status === 'fulfilled') {
+          setOpenEpisodes(asArray(openResult.value?.episodes));
+        } else if (!signal?.aborted) {
+          errors.push(openResult.reason?.message || 'Failed to load open HCM episodes.');
+        }
+
+        if (effectivenessResult.status === 'fulfilled') {
+          setEffectiveness(asArray(effectivenessResult.value?.effectiveness));
+        } else if (!signal?.aborted) {
+          errors.push(effectivenessResult.reason?.message || 'Failed to load HCM effectiveness.');
+        }
+
+        if (knowledgeResult.status === 'fulfilled') {
+          setKnowledgeItems(asArray(knowledgeResult.value?.knowledgeItems));
+        } else if (!signal?.aborted) {
+          errors.push(knowledgeResult.reason?.message || 'Failed to load HCM knowledge.');
+        }
+
+        if (errors.length) setError(errors.join(' '));
       } finally {
         setLoading(false);
+      }
+
+      if (latestEpisodeId && !signal?.aborted) {
+        loadLatestDetail(latestEpisodeId, signal).catch((error) => {
+          if (error?.name !== 'AbortError') console.warn('[HCM_DETAIL_WARN]', error?.message || error);
+        });
       }
     },
     [loadLatestDetail]
@@ -729,10 +795,10 @@ export default function HCMPanel() {
       {episodes.length ? (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
-            <FieldCard label="Total Episodes" value={episodes.length} />
+            <FieldCard label="Loaded Episodes" value={episodes.length} />
             <FieldCard label="Open Episodes" value={openEpisodes.length} />
-            <FieldCard label="Closed Episodes" value={closedCount} />
-            <FieldCard label="Effectiveness" value={effectiveness.length} />
+            <FieldCard label="Closed in Loaded Window" value={closedCount} />
+            <FieldCard label="Recent Effectiveness" value={effectiveness.length} />
           </div>
 
           <div style={cardStyle}>
@@ -920,6 +986,11 @@ export default function HCMPanel() {
           ) : null}
 
           {detailsLoading ? <div style={{ color: '#64748b', fontWeight: 800 }}>Loading technical details...</div> : null}
+          {detailsError ? (
+            <div style={{ ...cardStyle, borderColor: '#fecaca', background: '#fef2f2', color: '#991b1b' }}>
+              {detailsError}
+            </div>
+          ) : null}
         </>
       ) : null}
     </section>

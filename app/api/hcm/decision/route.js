@@ -1,11 +1,14 @@
 import { registerDecision } from '../../../../services/memory/cognitiveEpisodicMemoryService';
 import { jsonError, jsonOk, readJsonBody } from '../_response';
+import { commitHcmMirror, initializeHcmPrimary } from '../../../../services/memory/mongoHcmRepository';
 
 export async function POST(request) {
   try {
+    await initializeHcmPrimary();
     const body = await readJsonBody(request);
     console.log('[HCM DECISION] request payload', body);
     const result = registerDecision(body);
+    await commitHcmMirror();
     console.log('[HCM DECISION] response', {
       status: 201,
       decisionId: result.decision?.decisionId,

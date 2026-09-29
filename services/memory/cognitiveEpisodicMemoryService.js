@@ -37,6 +37,7 @@ const IMMUTABLE_KNOWLEDGE_FIELDS = new Set([
 ]);
 
 const inMemoryStore = { episodes: [], events: [], decisions: [], effectiveness: [], knowledgeItems: [] };
+const HCM_READ_CACHE_KEY = '__acsmHcmReadCache';
 
 const dataFilePath = () =>
   process.env.HCM_STORE_PATH || path.join(process.cwd(), 'data', 'hcm-store.json');
@@ -61,6 +62,11 @@ const toFiniteNumber = (value, fallback = null) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 };
+const applyLimit = (items, limit) => {
+  const numeric = Number(limit);
+  if (!Number.isFinite(numeric) || numeric <= 0) return items;
+  return items.slice(0, Math.floor(numeric));
+};
 const round = (value, digits = 4) =>
   Number.isFinite(value) ? Number(value.toFixed(digits)) : null;
 const makeId = (prefix) =>
@@ -76,11 +82,37 @@ const normalizeStore = (store = {}) => ({
   knowledgeItems: toArray(store.knowledgeItems),
 });
 
-const readStore = () => {
+const getReadCache = () => {
+  if (!globalThis[HCM_READ_CACHE_KEY]) {
+    globalThis[HCM_READ_CACHE_KEY] = { file: '', mtimeMs: -1, size: -1, store: null };
+  }
+  return globalThis[HCM_READ_CACHE_KEY];
+};
+
+const readStore = ({ cached = false } = {}) => {
   try {
     const file = dataFilePath();
     if (!fs.existsSync(file)) return normalizeStore(inMemoryStore);
-    return normalizeStore(JSON.parse(fs.readFileSync(file, 'utf-8')));
+    const stat = fs.statSync(file);
+    const cache = getReadCache();
+    if (
+      cached &&
+      cache.store &&
+      cache.file === file &&
+      cache.mtimeMs === stat.mtimeMs &&
+      cache.size === stat.size
+    ) {
+      return cache.store;
+    }
+
+    const store = normalizeStore(JSON.parse(fs.readFileSync(file, 'utf-8')));
+    if (cached) {
+      cache.file = file;
+      cache.mtimeMs = stat.mtimeMs;
+      cache.size = stat.size;
+      cache.store = store;
+    }
+    return store;
   } catch {
     return normalizeStore(inMemoryStore);
   }
@@ -96,6 +128,12 @@ const writeStore = (store) => {
   const file = dataFilePath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(normalized, null, 2)}\n`, 'utf-8');
+  const stat = fs.statSync(file);
+  const cache = getReadCache();
+  cache.file = file;
+  cache.mtimeMs = stat.mtimeMs;
+  cache.size = stat.size;
+  cache.store = normalized;
   return clone(normalized);
 };
 
@@ -529,16 +567,17 @@ export const registerKnowledgeItem = (payload = {}) => {
 };
 
 export const listKnowledgeItems = (filters = {}) => {
-  const store = readStore();
+  const store = readStore({ cached: true });
   const cpsId = normalizeCpsId(filters.cpsId);
-  return store.knowledgeItems
+  const items = store.knowledgeItems
     .filter((item) => !cpsId || item.cpsId === cpsId)
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
     .map(clone);
+  return applyLimit(items, filters.limit);
 };
 
 export const getKnowledgeItemById = (knowledgeId) => {
-  const store = readStore();
+  const store = readStore({ cached: true });
   return clone(getKnowledgeItem(store, safeText(knowledgeId)));
 };
 
@@ -612,24 +651,35 @@ export const curateKnowledgeItem = (knowledgeId, payload = {}) => {
 };
 
 export const listEpisodes = (filters = {}) => {
-  const store = readStore();
-  if (markTimedOutEpisodes(store, filters)) writeStore(store);
-  const refreshed = readStore();
+  const cachedStore = readStore({ cached: true });
+  const store = {
+    ...cachedStore,
+    episodes: cachedStore.episodes.map((episode) => ({ ...episode })),
+  };
+  markTimedOutEpisodes(store, filters);
   const status = safeText(filters.status).toLowerCase();
-  return refreshed.episodes
+  const episodes = store.episodes
     .filter((episode) => !status || episode.status === status)
     .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  return applyLimit(episodes, filters.limit);
 };
 
 export const getEpisode = (episodeId) => {
-  const store = readStore();
-  if (markTimedOutEpisodes(store)) writeStore(store);
-  return getCompleteEpisode(readStore(), episodeId);
+  const cachedStore = readStore({ cached: true });
+  const store = {
+    ...cachedStore,
+    episodes: cachedStore.episodes.map((episode) => ({ ...episode })),
+  };
+  markTimedOutEpisodes(store);
+  return getCompleteEpisode(store, episodeId);
 };
 
-export const listEffectiveness = () => {
-  const store = readStore();
-  return store.effectiveness.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+export const listEffectiveness = (filters = {}) => {
+  const store = readStore({ cached: true });
+  const effectiveness = [...store.effectiveness].sort(
+    (a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)
+  );
+  return applyLimit(effectiveness, filters.limit);
 };
 
 export const cognitiveEpisodicMemoryService = {

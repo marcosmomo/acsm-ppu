@@ -495,7 +495,6 @@ const SUPPLY_CHAIN_FEEDBACK_LOCAL_TOPIC =
   ACSM_TOPICS.supplyChainFeedbackLocal || `supplychain/feedback/${ACTIVE_ACSM.id}`;
 
 const DEBUG_LOG_ALL_TOPICS = true;
-const CPS_AUTOLOAD_DELAY_MS = 3000;
 const FEATURE_UI_UPDATE_MS = 5000;
 
 const LIFECYCLE_UNPLUG_REQUEST_TOPIC = ACSM_TOPICS.lifecycleUnplugRequest;
@@ -1717,11 +1716,20 @@ const parseAASCps = (parsed) => {
 
   const cpsId = normalizeCpsId(rawId) || 'unknown';
 
-  const nome =
+  const assetName =
     getSpecificAssetIdValue(aas, 'assetName') ||
     getPropertyValueFromElements(smDigital?.submodelElements, 'ManufacturerProductDesignation') ||
     aas?.idShort ||
     cpsId;
+
+  const displayName =
+    getSpecificAssetIdValue(aas, 'displayName') ||
+    (Array.isArray(aas?.displayName)
+      ? aas.displayName.find((entry) => entry?.language === 'en')?.text ||
+        aas.displayName.find((entry) => entry?.language === 'en-US')?.text ||
+        aas.displayName[0]?.text
+      : '') ||
+    assetName;
 
   const manufacturer =
     getSpecificAssetIdValue(aas, 'manufacturer') ||
@@ -1843,7 +1851,9 @@ const parseAASCps = (parsed) => {
     aas,
     cps: {
       id: cpsId,
-      nome,
+      nome: displayName,
+      assetName,
+      displayName,
       descricao:
         realDescription ||
         `${sanitizeManagedText(manufacturer)}${assetType ? ` - ${sanitizeManagedText(assetType)}` : ''}${
@@ -1868,7 +1878,7 @@ const parseAASCps = (parsed) => {
       },
       lifecycle: {
         cpsId,
-        cpsName: nome,
+        cpsName: displayName,
         baseTopic: topic,
         currentPhase,
         supportedPhases,
@@ -3224,6 +3234,20 @@ export const CPSProvider = ({ children, acsmId, config }) => {
   }, [cpsAnalytics]);
 
   useEffect(() => {
+    if (playPhaseCPS.length === 0) {
+      const empty = emptySystemAnalytics();
+      const emptySignature = JSON.stringify(empty);
+      stableSystemAnalyticsUpdatedAtRef.current = 0;
+
+      if (JSON.stringify(systemAnalytics) !== emptySignature) {
+        setSystemAnalytics(empty);
+      }
+      if (JSON.stringify(stableSystemAnalytics) !== emptySignature) {
+        setStableSystemAnalytics(empty);
+      }
+      return undefined;
+    }
+
     if (!hasDisplayableSystemAnalytics(systemAnalytics)) return undefined;
 
     if (hasStructuralSystemAnalyticsChange(stableSystemAnalytics, systemAnalytics)) {
@@ -3251,7 +3275,7 @@ export const CPSProvider = ({ children, acsmId, config }) => {
     }, delay);
 
     return () => clearTimeout(timerId);
-  }, [stableSystemAnalytics, systemAnalytics]);
+  }, [playPhaseCPS.length, stableSystemAnalytics, systemAnalytics]);
 
   const setCpsAnalytics = useCallback((updater) => {
     setCpsAnalyticsState((prev) => {
@@ -4002,17 +4026,9 @@ export const CPSProvider = ({ children, acsmId, config }) => {
 
     if (!cpsEntries.length) {
       const empty = emptySystemAnalytics();
-      setSystemAnalytics((prev) => ({
-        ...prev,
-        ...empty,
-        systemEvidence: {},
-        actionPlan: prev.actionPlan || {},
-        systemState: prev.systemState || {},
-        supportingSignals: [],
-        riskDrivers: [],
-        crossCpsPatterns: [],
-        coordinationMode: prev.coordinationMode ?? null,
-      }));
+      stableSystemAnalyticsUpdatedAtRef.current = 0;
+      setSystemAnalytics(empty);
+      setStableSystemAnalytics(empty);
       return empty;
     }
 
@@ -4020,17 +4036,9 @@ export const CPSProvider = ({ children, acsmId, config }) => {
 
     if (!latest.length) {
       const empty = emptySystemAnalytics();
-      setSystemAnalytics((prev) => ({
-        ...prev,
-        ...empty,
-        systemEvidence: {},
-        actionPlan: prev.actionPlan || {},
-        systemState: prev.systemState || {},
-        supportingSignals: [],
-        riskDrivers: [],
-        crossCpsPatterns: [],
-        coordinationMode: prev.coordinationMode ?? null,
-      }));
+      stableSystemAnalyticsUpdatedAtRef.current = 0;
+      setSystemAnalytics(empty);
+      setStableSystemAnalytics(empty);
       return empty;
     }
 
@@ -6061,24 +6069,62 @@ export const CPSProvider = ({ children, acsmId, config }) => {
   );
 
   useEffect(() => {
-    let timeouts = [];
+    let cancelled = false;
 
     const loadCpsFromServer = async () => {
       try {
         const query = new URLSearchParams({ acsmId: acsmConfig.id }).toString();
-        const res = await fetch(`/api/cps?${query}`);
-        if (!res.ok) throw new Error('Failed to fetch /api/cps');
+        const res = await fetch(`/api/cps?${query}`, { cache: 'no-store' });
+        if (!res.ok) {
+          const errorBody = await res.text().catch(() => '');
+          throw new Error(`Failed to fetch /api/cps (${res.status}): ${errorBody || res.statusText}`);
+        }
         const data = await res.json();
         const arr = Array.isArray(data.cps) ? data.cps : [];
+        if (cancelled) return;
 
-        arr.forEach((parsed, index) => {
-          const delay = CPS_AUTOLOAD_DELAY_MS * (index + 1);
-          const id = setTimeout(() => {
-            registerCPS(parsed);
-          }, delay);
-          timeouts.push(id);
-        });
+        const results = await Promise.allSettled(
+          arr.map(async (parsed, index) => {
+            const aas = Array.isArray(parsed?.assetAdministrationShells)
+              ? parsed.assetAdministrationShells[0]
+              : null;
+            const rawId =
+              getSpecificAssetIdValue(aas, 'cpsId') || aas?.idShort || `item-${index + 1}`;
+            const normalizedId = normalizeCpsId(rawId);
+
+            if (cancelled) return { rawId, normalizedId, cancelled: true };
+
+            const registered = registerCPS(parsed);
+            if (!registered) {
+              throw new Error(`Registration rejected for ${rawId} (${normalizedId || 'unknown'}).`);
+            }
+
+            return { rawId, normalizedId, registered: true };
+          })
+        );
+
+        if (cancelled) return;
+
+        const failures = results
+          .map((result, index) => ({ result, index }))
+          .filter(({ result }) => result.status === 'rejected')
+          .map(({ result, index }) =>
+            result.reason?.message || `CPS item ${index + 1} failed to register.`
+          );
+
+        setLog((prev) => [
+          ...prev,
+          {
+            time: new Date().toLocaleTimeString(),
+            message: `[PLUG_LOAD] Registered ${results.length - failures.length}/${results.length} CPS from /api/cps.`,
+          },
+          ...failures.map((message) => ({
+            time: new Date().toLocaleTimeString(),
+            message: `[PLUG_LOAD_ITEM_ERROR] ${message}`,
+          })),
+        ]);
       } catch (e) {
+        if (cancelled) return;
         setLog((prev) => [
           ...prev,
           {
@@ -6092,7 +6138,7 @@ export const CPSProvider = ({ children, acsmId, config }) => {
     loadCpsFromServer();
 
     return () => {
-      timeouts.forEach((id) => clearTimeout(id));
+      cancelled = true;
     };
   }, [acsmConfig.id, registerCPS]);
 

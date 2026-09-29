@@ -1,11 +1,14 @@
 import { registerEvent } from '../../../../services/memory/cognitiveEpisodicMemoryService';
 import { jsonError, jsonOk, readJsonBody } from '../_response';
+import { commitHcmMirror, initializeHcmPrimary } from '../../../../services/memory/mongoHcmRepository';
 
 export async function POST(request) {
   try {
+    await initializeHcmPrimary();
     const body = await readJsonBody(request);
     console.log('[HCM EVENT] request payload', body);
     const result = registerEvent(body);
+    await commitHcmMirror();
     console.log('[HCM EVENT] response', {
       status: 201,
       eventId: result.event?.eventId,
